@@ -101,8 +101,8 @@ public class OrderService {
             // Update total
             totalAmount = totalAmount.add(subtotal);
 
-            // Update stock - FIXED: pass Integer instead of primitive int
-            productClient.updateStock(product.getId(), itemDTO.getQuantity());
+            // Decrease stock: product-service adds the given quantity to the current stock
+            productClient.updateStock(product.getId(), -itemDTO.getQuantity());
         }
 
         order.setTotalAmount(totalAmount);
@@ -136,8 +136,8 @@ public class OrderService {
 
         // Restore stock for each item
         for (OrderItem item : order.getItems()) {
-            // FIXED: pass negative quantity to restore stock
-            productClient.updateStock(item.getProductId(), -item.getQuantity());
+            // Restore stock: product-service adds the given quantity to the current stock
+            productClient.updateStock(item.getProductId(), item.getQuantity());
         }
 
         order.setStatus(OrderStatus.CANCELLED);
