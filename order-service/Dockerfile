@@ -14,5 +14,5 @@ COPY --from=build --chown=10001:10001 /app/target/*.jar app.jar
 USER 10001
 EXPOSE 8082
 HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=5 \
-  CMD wget -qO- http://127.0.0.1:8082/actuator/health || exit 1
+  CMD ["sh", "-c", "wget -qO- http://127.0.0.1:8082/actuator/health || exit 1"]
 ENTRYPOINT ["java", "-XX:MaxRAMPercentage=75.0", "-jar", "app.jar"]
