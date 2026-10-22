@@ -1,6 +1,8 @@
 # E-commerce Microservices: Spring Boot & Spring Cloud
 
-A small e-commerce backend built as **microservices** with **Spring Boot 3.2** and **Spring Cloud 2023.0**. It shows service discovery, centralised configuration, an API gateway with circuit breakers, inter-service calls with OpenFeign, and a separate database per service. Everything is containerised with Docker Compose.
+A small e-commerce backend built as **microservices** with **Spring Boot 4.0** and **Spring Cloud 2025.1**. It shows service discovery, centralised configuration, an API gateway with circuit breakers, inter-service calls with OpenFeign, and a separate database per service.
+
+It runs three ways: **Docker Compose** on a laptop, **Kubernetes** locally (kind), and **AWS EKS** provisioned with **Terraform**, deployed by a **DevSecOps pipeline** that blocks vulnerable images and misconfigured infrastructure. See [Cloud deployment on AWS](#cloud-deployment-on-aws-eks).
 
 ---
 
@@ -18,7 +20,7 @@ A small e-commerce backend built as **microservices** with **Spring Boot 3.2** a
       │ Product Service :8081│ ◄──────────── │  Order Service :8082 │
       └──────────┬───────────┘ (stock check) └──────────┬───────────┘
                  ▼                                      ▼
-          MySQL 8 :3306                         PostgreSQL 15 :5432
+          MySQL 8 :3306                         PostgreSQL :5432
            (productdb)                              (orderdb)
 
       ┌──────────────────────┐     ┌──────────────────────┐
@@ -37,13 +39,16 @@ A small e-commerce backend built as **microservices** with **Spring Boot 3.2** a
 
 ## Tech stack
 
-- **Java 17**, **Spring Boot 3.2**, **Spring Cloud 2023.0.0**
+- **Java 17**, **Spring Boot 4.0**, **Spring Cloud 2025.1** (Hibernate 7, Spring Framework 7)
 - Spring Cloud **Gateway**, **Netflix Eureka**, **Config Server**, **OpenFeign**
 - **Resilience4j** circuit breakers (gateway + Feign client)
 - **Spring Data JPA** + **Bean Validation**
 - **MySQL 8** (products), **PostgreSQL 15** (orders)
 - **springdoc-openapi** (Swagger UI), **Spring Boot Actuator**
-- **Docker** multi-stage builds + **Docker Compose**
+- **Docker** multi-stage builds (non-root, healthchecked) + **Docker Compose**
+- **AWS**: VPC, EKS, ECR, RDS (MySQL 8.4, PostgreSQL 16), KMS, Secrets Manager, IAM (OIDC + IRSA), all in **Terraform**
+- **Kubernetes**: Kustomize overlays, NetworkPolicies, Pod Security Admission, HPA, External Secrets Operator
+- **CI/CD**: GitHub Actions with hadolint, Trivy, Checkov, kubeconform, gitleaks
 
 ## Getting started
 
@@ -147,17 +152,133 @@ curl -X POST http://localhost:8080/api/orders \
 - **Gateway circuit breakers** (`productCircuitBreaker`, `orderCircuitBreaker`): sliding window of 10 calls, 50% failure threshold, 10 s open state. When a service is down, the gateway forwards to `/fallback/products` or `/fallback/orders`.
 - **Feign circuit breaker** in Order Service (`productService`), with fallbacks for `getProduct` and `updateStock`.
 
+## Cloud deployment on AWS (EKS)
+
+The same services run on **Amazon EKS**, with every AWS resource defined in Terraform and every deployment going through a security-gated pipeline.
+
+```mermaid
+flowchart LR
+    dev[git push] --> ci[GitHub Actions CI<br/>build · test · hadolint · Trivy<br/>Checkov · kubeconform · gitleaks]
+    ci -->|deploy.yml, OIDC role<br/>no stored AWS keys| ecr[(ECR<br/>immutable tags<br/>scan on push · KMS)]
+    ecr --> eks
+    subgraph vpc[VPC 10.0.0.0/16 · 2 AZs · flow logs]
+      subgraph pub[public subnets]
+        nlb[Network Load Balancer]
+      end
+      subgraph priv[private subnets]
+        eks[EKS · ns ecommerce<br/>PSA restricted · NetworkPolicies<br/>gateway · product · order · eureka · config]
+        eso[External Secrets Operator<br/>IRSA]
+      end
+      subgraph db[database subnets · no internet route]
+        mysql[(RDS MySQL 8.4)]
+        pg[(RDS PostgreSQL 16)]
+      end
+    end
+    user[client] --> nlb --> eks
+    eks -->|TLS only| mysql
+    eks -->|TLS only| pg
+    sm[Secrets Manager<br/>KMS-encrypted] --> eso --> eks
+```
+
+### Security controls
+
+| Layer | Control | Where |
+|---|---|---|
+| Identity | GitHub Actions assumes an AWS role through **OIDC**, restricted to `main` of this repo; no access keys exist | `infra/terraform/iam.tf` |
+| Identity | CI/CD can only touch the `ecommerce` namespace (EKS access entry, namespace-scoped policy) | `infra/terraform/eks.tf` |
+| Identity | External Secrets reads exactly two secrets via **IRSA**; pods cannot reach node credentials (IMDSv2, hop limit 1) | `iam.tf`, `eks.tf` |
+| Network | 3-tier VPC: databases in subnets with no internet route; DB security groups accept only the EKS nodes | `vpc.tf`, `rds.tf` |
+| Network | **Default-deny NetworkPolicies**: only gateway → product/order, order → product, services → Eureka, DB ports | `k8s/base/network-policies.yaml` |
+| Network | EKS API endpoint private, public only from `admin_cidrs` (0.0.0.0/0 rejected by validation) | `variables.tf` |
+| Data | KMS (rotated) for ECR, RDS storage and Secrets Manager; EKS envelope-encrypts Kubernetes Secrets | `main.tf`, `eks.tf` |
+| Data | RDS **rejects non-TLS connections** (`require_secure_transport`, `rds.force_ssl`); JDBC URLs require TLS | `rds.tf` |
+| Data | No credentials in git: Terraform writes them to Secrets Manager, ESO syncs them into the cluster | `k8s/overlays/aws/external-secrets.yaml` |
+| Workload | **Pod Security Admission `restricted`**: non-root (UID 10001), read-only root FS, all capabilities dropped, seccomp, no SA token | `k8s/namespace`, `k8s/base/*.yaml` |
+| Workload | Gateway actuator (route management, the CVE-2022-22947 attack surface) is not exposed | `api-gateway/.../application.yml` |
+| Supply chain | Every action pinned to a commit SHA; images tagged with the commit SHA in **immutable** ECR repos | `.github/workflows` |
+| Supply chain | Build fails on fixable HIGH/CRITICAL CVEs (Trivy) and on IaC misconfigurations (Checkov) | `ci.yml`, `deploy.yml` |
+| Audit | EKS control-plane logs (API, audit, authenticator), VPC flow logs, RDS logs and Enhanced Monitoring | `eks.tf`, `vpc.tf`, `rds.tf` |
+
+Every Checkov finding that is deliberately not fixed carries an inline `#checkov:skip` with the reason (for example, Multi-AZ is a variable that is off in dev to save cost).
+
+### What the security gates found
+
+Turning on the Trivy gate showed that the original Spring Boot 3.2.0 stack shipped **about 300 known, fixable HIGH/CRITICAL vulnerabilities** (47 critical, in Spring, Tomcat, Netty, Jackson, Logback and the JDBC drivers). The fix:
+
+1. Upgraded to Spring Boot 3.5, which removed most of them but left critical Spring Framework CVEs that are only fixed in Framework 7 (Boot 3.5 open-source support ended in June 2026).
+2. Migrated to **Spring Boot 4.0.9 / Spring Cloud 2025.1.3** (Gateway server-webflux properties, Hibernate 7 dialect detection, resilience4j-spring-boot4, springdoc 3).
+3. Overrode one transitive library (`httpcore5`) that Boot 4.0.9 still pins to a vulnerable version.
+4. Removed the unused `jjwt` dependency and the exposed gateway actuator.
+
+Result: **0 fixable HIGH/CRITICAL vulnerabilities** in the Maven dependency tree.
+
+It also surfaced four bugs that broke `docker compose up`: a stray `ENTRYPOINT` before `FROM` in the config-server Dockerfile, healthchecks calling `curl` (absent from the Alpine JRE image), order-service calling product-service on `localhost` inside its container, and an `EXPOSE` on the wrong port. A fifth was in the registry itself: Eureka listed its own URL as a peer and replicated every registration to itself (fixed with the standard standalone configuration).
+
+### Deploy it
+
+Prerequisites: AWS CLI, Terraform >= 1.10, kubectl, Helm.
+
+```bash
+# 1. Infrastructure (about 15-20 minutes)
+cd infra/terraform
+cp backend.hcl.example backend.hcl            # S3 bucket for state
+cp terraform.tfvars.example terraform.tfvars  # set admin_cidrs to your IP
+terraform init -backend-config=backend.hcl
+terraform apply
+
+# 2. One-time cluster setup: External Secrets Operator, metrics-server, namespace, secret store
+cd ../.. && ./scripts/bootstrap-cluster.sh
+
+# 3. In GitHub: Settings > Secrets and variables > Actions > Variables
+#    AWS_REGION, AWS_ROLE_ARN (github_actions_role_arn), EKS_CLUSTER_NAME (cluster_name)
+#    Then run the "Deploy to EKS" workflow. It prints the gateway URL when the smoke test passes.
+
+# 4. Tear down when done
+cd infra/terraform && terraform destroy
+```
+
+**Run the Kubernetes version locally for free** (Docker + [kind](https://kind.sigs.k8s.io/)): `./scripts/local-up.sh`
+
+### Cost
+
+This is a dev stack meant to be created, demonstrated and destroyed. Running, it costs roughly **$0.25/hour (about $6/day)** in `eu-west-3`: EKS control plane $0.10/h, NAT gateway, two Spot `t3.medium` nodes, two `db.t4g.micro` databases and the load balancer. Always run `terraform destroy` afterwards.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| `mvn verify` (all 5 services; product and order boot their full context against H2) | Pass |
+| Eureka, Config Server and gateway started with the cluster's ConfigMap env: liveness/readiness probes, Eureka registration by IP, gateway routes and circuit-breaker fallbacks | Pass |
+| `terraform validate` / `fmt` | Pass |
+| Checkov, Terraform | 140 passed, 0 failed |
+| Checkov, Kubernetes (AWS overlay as deployed) | 451 passed, 0 failed |
+| Checkov, Dockerfiles / hadolint | 300 passed, 0 failed / clean |
+| kubeconform, Kubernetes 1.33 schema (both overlays, CRDs included) | 70 resources valid |
+| Trivy, Maven dependencies | 0 fixable HIGH/CRITICAL |
+
+### Roadmap
+
+- HTTPS: AWS Load Balancer Controller + ALB Ingress with an ACM certificate (the NLB currently serves HTTP).
+- Automatic DB credential rotation (Secrets Manager rotation Lambda + Reloader to restart pods).
+- Per-service DB users with least privilege instead of the RDS master user.
+- Prometheus + Grafana via kube-prometheus-stack; image signing with cosign and admission verification.
+
 ## Project structure
 
 ```
 Microservices/
-├── eureka-server/
-├── config-server/
-├── api-gateway/          # routes, CORS, FallbackController
-├── product-service/      # controller → service → repository, DTOs, exception handler
-├── order-service/        # + client/ProductClient (Feign)
+├── eureka-server/  config-server/  api-gateway/  product-service/  order-service/
 ├── docker-compose.yml
-└── pom.xml               # parent aggregator
+├── infra/terraform/          # AWS: VPC, EKS, ECR, RDS, KMS, Secrets Manager, IAM
+├── k8s/
+│   ├── namespace/            # app namespace + Pod Security Admission (cluster-admin)
+│   ├── base/                 # Deployments, Services, NetworkPolicies, HPA, PDB
+│   └── overlays/
+│       ├── aws/              # NLB for the gateway, ExternalSecrets -> Secrets Manager
+│       └── local/            # kind: in-cluster MySQL/PostgreSQL
+├── scripts/                  # bootstrap-cluster.sh (EKS add-ons), local-up.sh (kind)
+├── .github/workflows/        # ci.yml (build, scan, IaC checks), deploy.yml (OIDC -> ECR -> EKS)
+└── pom.xml                   # parent aggregator
 ```
 
 ## Author
