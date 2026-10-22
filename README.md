@@ -1,5 +1,7 @@
 # E-commerce Microservices: Spring Boot & Spring Cloud
 
+[![CI](https://github.com/fidaaltf58/Microservices/actions/workflows/ci.yml/badge.svg)](https://github.com/fidaaltf58/Microservices/actions/workflows/ci.yml) ![Terraform](https://img.shields.io/badge/IaC-Terraform-7B42BC) ![AWS EKS](https://img.shields.io/badge/AWS-EKS-FF9900) ![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.0-6DB33F)
+
 A small e-commerce backend built as **microservices** with **Spring Boot 4.0** and **Spring Cloud 2025.1**. It shows service discovery, centralised configuration, an API gateway with circuit breakers, inter-service calls with OpenFeign, and a separate database per service.
 
 It runs three ways: **Docker Compose** on a laptop, **Kubernetes** locally (kind), and **AWS EKS** provisioned with **Terraform**, deployed by a **DevSecOps pipeline** that blocks vulnerable images and misconfigured infrastructure. See [Cloud deployment on AWS](#cloud-deployment-on-aws-eks).
