@@ -1,0 +1,114 @@
+name: Deploy to EKS
+
+# Manual trigger: the AWS stack is created/destroyed on demand (see README, "Cost").
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # OIDC token exchanged for short-lived AWS credentials; no access keys stored in GitHub
+
+concurrency:
+  group: deploy-eks
+  cancel-in-progress: false
+
+# Repository variables (Settings > Secrets and variables > Actions > Variables), from `terraform output`:
+#   AWS_REGION, AWS_ROLE_ARN (github_actions_role_arn), EKS_CLUSTER_NAME (cluster_name)
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  EKS_CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME }}
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  images:
+    name: Build, scan, push (${{ matrix.service }})
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        service: [eureka-server, config-server, api-gateway, product-service, order-service]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ matrix.service }}
+          load: true
+          push: false
+          tags: ${{ steps.ecr.outputs.registry }}/ecommerce/${{ matrix.service }}:${{ env.IMAGE_TAG }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+      # Gate: nothing with a fixable HIGH/CRITICAL vulnerability reaches the registry
+      - name: Scan image (Trivy)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.ecr.outputs.registry }}/ecommerce/${{ matrix.service }}:${{ env.IMAGE_TAG }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Push to ECR (immutable tag = commit SHA)
+        run: docker push "${{ steps.ecr.outputs.registry }}/ecommerce/${{ matrix.service }}:${IMAGE_TAG}"
+
+  deploy:
+    name: Deploy to EKS
+    needs: images
+    runs-on: ubuntu-24.04
+    environment: dev
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+      - uses: azure/setup-kubectl@bda439f5f36b99b262ebdcd3613869bddb064c8e # v5.2.0
+        with:
+          version: v1.33.3
+      - name: Connect to the cluster
+        run: aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER_NAME"
+
+      - name: Pin images to this commit
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          mkdir -p release
+          {
+            echo "apiVersion: kustomize.config.k8s.io/v1beta1"
+            echo "kind: Kustomization"
+            echo "resources: [../k8s/overlays/aws]"
+            echo "images:"
+            for s in eureka-server config-server api-gateway product-service order-service; do
+              echo "  - { name: ecommerce/$s, newName: $REGISTRY/ecommerce/$s, newTag: \"$IMAGE_TAG\" }"
+            done
+          } > release/kustomization.yaml
+          cat release/kustomization.yaml
+
+      - name: Apply
+        run: kubectl apply -k release
+
+      - name: Wait for rollouts
+        run: |
+          for s in eureka-server config-server api-gateway product-service order-service; do
+            kubectl -n ecommerce rollout status "deployment/$s" --timeout=10m
+          done
+
+      - name: Smoke test through the load balancer
+        run: |
+          for i in $(seq 1 30); do
+            HOST=$(kubectl -n ecommerce get svc api-gateway -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+            if [ -n "$HOST" ] && curl -sf "http://$HOST/actuator/health"; then
+              echo; echo "Gateway is live at http://$HOST"; exit 0
+            fi
+            sleep 20
+          done
+          echo "Gateway did not become healthy in time"; exit 1
