@@ -6,44 +6,46 @@ spring:
     name: api-gateway
   cloud:
     gateway:
-      discovery:
-        locator:
-          enabled: true
-          lower-case-service-id: true
-      routes:
-        # Product Service Routes
-        - id: product-service
-          uri: lb://PRODUCT-SERVICE
-          predicates:
-            - Path=/api/products/**
-          filters:
-            - name: CircuitBreaker
-              args:
-                name: productCircuitBreaker
-                fallbackUri: forward:/fallback/products
+      server:
+        webflux:
+          discovery:
+            locator:
+              enabled: true
+              lower-case-service-id: true
+          routes:
+            # Product Service Routes
+            - id: product-service
+              uri: lb://PRODUCT-SERVICE
+              predicates:
+                - Path=/api/products/**
+              filters:
+                - name: CircuitBreaker
+                  args:
+                    name: productCircuitBreaker
+                    fallbackUri: forward:/fallback/products
 
-        # Order Service Routes
-        - id: order-service
-          uri: lb://ORDER-SERVICE
-          predicates:
-            - Path=/api/orders/**
-          filters:
-            - name: CircuitBreaker
-              args:
-                name: orderCircuitBreaker
-                fallbackUri: forward:/fallback/orders
+            # Order Service Routes
+            - id: order-service
+              uri: lb://ORDER-SERVICE
+              predicates:
+                - Path=/api/orders/**
+              filters:
+                - name: CircuitBreaker
+                  args:
+                    name: orderCircuitBreaker
+                    fallbackUri: forward:/fallback/orders
 
-      globalcors:
-        cors-configurations:
-          '[/**]':
-            allowedOrigins: "*"
-            allowedMethods:
-              - GET
-              - POST
-              - PUT
-              - DELETE
-              - OPTIONS
-            allowedHeaders: "*"
+          globalcors:
+            cors-configurations:
+              '[/**]':
+                allowedOrigins: "*"
+                allowedMethods:
+                  - GET
+                  - POST
+                  - PUT
+                  - DELETE
+                  - OPTIONS
+                allowedHeaders: "*"
 
 eureka:
   client:
@@ -56,10 +58,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,gateway,metrics
-  endpoint:
-    gateway:
-      enabled: true
+        include: health,info,metrics
 
 resilience4j:
   circuitbreaker:
