@@ -1,0 +1,11 @@
+# Copy to terraform.tfvars and adjust.
+region      = "eu-west-3"
+environment = "dev"
+
+# Your public IP, so kubectl can reach the cluster API (curl https://checkip.amazonaws.com)
+admin_cidrs = ["203.0.113.10/32"]
+
+node_capacity_type = "SPOT"
+node_desired_size  = 2
+
+github_repository = "fidaaltf58/Microservices"

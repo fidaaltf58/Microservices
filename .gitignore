@@ -37,3 +37,18 @@ build/
 
 ### Mac OS ###
 .DS_Store
+### Terraform ###
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+backend.hcl
+crash.log
+
+### Local Kubernetes secrets ###
+k8s/overlays/local/databases/*.env
+
+### CI scratch dirs ###
+release/
+rendered/
