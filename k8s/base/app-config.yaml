@@ -1,0 +1,16 @@
+# Non-secret settings shared by every service (Spring relaxed binding maps these env vars to properties)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+data:
+  EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+  # Register pod IPs, not pod hostnames (which other pods cannot resolve)
+  EUREKA_INSTANCE_PREFERIPADDRESS: "true"
+  # order-service -> product-service through the Kubernetes Service
+  PRODUCT_SERVICE_URL: http://product-service:8081
+  # Liveness/readiness health groups used by the pod probes (explicit, not left to platform auto-detection)
+  MANAGEMENT_ENDPOINT_HEALTH_PROBES_ENABLED: "true"
+  SPRING_JPA_SHOW_SQL: "false"
+  LOGGING_LEVEL_ORG_HIBERNATE_SQL: INFO
+  LOGGING_LEVEL_FEIGN: INFO

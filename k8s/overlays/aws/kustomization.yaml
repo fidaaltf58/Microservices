@@ -1,0 +1,12 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+  - external-secrets.yaml
+
+patches:
+  - path: api-gateway-service.yaml
+
+# Image references are pinned at deploy time by .github/workflows/deploy.yml:
+#   kustomize edit set image ecommerce/<service>=<account>.dkr.ecr.<region>.amazonaws.com/ecommerce/<service>:<git-sha>
